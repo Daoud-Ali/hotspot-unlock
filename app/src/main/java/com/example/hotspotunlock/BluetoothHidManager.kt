@@ -21,7 +21,6 @@ class BluetoothHidManager(private val context: Context) {
     private val executor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     @Volatile private var isAppRegistered = false
-    @Volatile private var isConnectedState = false
 
     companion object {
         private const val TAG = "BluetoothHidManager"
@@ -64,11 +63,17 @@ class BluetoothHidManager(private val context: Context) {
             super.onAppStatusChanged(device, registered)
             isAppRegistered = registered
             Log.d(TAG, "HID App Status Registered: $registered")
+            
+            // Auto-connect once app SDP registration completes
+            if (registered) {
+                targetDevice?.let { dev ->
+                    hidDevice?.connect(dev)
+                }
+            }
         }
 
         override fun onConnectionStateChanged(device: BluetoothDevice?, state: Int) {
             super.onConnectionStateChanged(device, state)
-            isConnectedState = (state == BluetoothProfile.STATE_CONNECTED)
             Log.d(TAG, "Connection State Changed: $state for ${device?.name}")
         }
     }
@@ -86,7 +91,6 @@ class BluetoothHidManager(private val context: Context) {
             if (profile == BluetoothProfile.HID_DEVICE) {
                 hidDevice = null
                 isAppRegistered = false
-                isConnectedState = false
                 Log.d(TAG, "Bluetooth HID Device Profile Disconnected")
             }
         }
@@ -105,8 +109,6 @@ class BluetoothHidManager(private val context: Context) {
             BluetoothHidDevice.SUBCLASS1_KEYBOARD,
             HID_DESCRIPTOR
         )
-        
-        // Register SDP profile with callback handler
         hid.registerApp(sdp, null, null, executor, callback)
     }
 
@@ -118,7 +120,9 @@ class BluetoothHidManager(private val context: Context) {
         val device = bluetoothAdapter?.getRemoteDevice(address)
         if (device != null) {
             targetDevice = device
-            hidDevice?.connect(device)
+            if (isAppRegistered) {
+                hidDevice?.connect(device)
+            }
             return true
         }
         return false
@@ -144,9 +148,9 @@ class BluetoothHidManager(private val context: Context) {
 
         executor.execute {
             try {
-                // Ensure active HID connection
+                // Force HID connect before transmitting
                 hid.connect(dev)
-                Thread.sleep(300)
+                Thread.sleep(500)
 
                 // 1. Wake & Clear prompt
                 sendRawKeycode(hid, dev, MODIFIER_NONE, KEY_BACKSPACE)
@@ -178,14 +182,13 @@ class BluetoothHidManager(private val context: Context) {
         val keyDownReport = byteArrayOf(modifier, 0x00, keycode, 0x00, 0x00, 0x00, 0x00, 0x00)
         val keyUpReport = byteArrayOf(0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
 
-        // Use report ID 0 for descriptors without an explicit REPORT_ID declaration
         val sentDown = hid.sendReport(device, 0, keyDownReport)
-        Log.d(TAG, "sendReport keyDown result: $sentDown")
-        Thread.sleep(20)
+        Log.d(TAG, "sendReport keyDown: $sentDown")
+        Thread.sleep(25)
 
         val sentUp = hid.sendReport(device, 0, keyUpReport)
-        Log.d(TAG, "sendReport keyUp result: $sentUp")
-        Thread.sleep(20)
+        Log.d(TAG, "sendReport keyUp: $sentUp")
+        Thread.sleep(25)
     }
 
     private fun charToHidKeycode(c: Char): Pair<Byte, Byte> {
