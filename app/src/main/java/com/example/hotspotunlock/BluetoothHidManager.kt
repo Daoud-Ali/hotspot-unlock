@@ -30,11 +30,12 @@ class BluetoothHidManager(private val context: Context) {
         private const val KEY_ENTER: Byte = 0x28
         private const val KEY_SPACE: Byte = 0x2C
 
-        // Standard Keyboard HID Report Descriptor (No Report ID)
+        // Report ID 1 embedded in descriptor
         private val HID_DESCRIPTOR = byteArrayOf(
             0x05.toByte(), 0x01.toByte(), // USAGE_PAGE (Generic Desktop)
             0x09.toByte(), 0x06.toByte(), // USAGE (Keyboard)
             0xA1.toByte(), 0x01.toByte(), // COLLECTION (Application)
+            0x85.toByte(), 0x01.toByte(), // REPORT_ID (1) - Forced for stack buffer allocation
             0x05.toByte(), 0x07.toByte(), //   USAGE_PAGE (Keyboard)
             0x19.toByte(), 0xE0.toByte(), //   USAGE_MINIMUM (KB LeftControl)
             0x29.toByte(), 0xE7.toByte(), //   USAGE_MAXIMUM (KB Right GUI)
@@ -62,9 +63,8 @@ class BluetoothHidManager(private val context: Context) {
         override fun onAppStatusChanged(device: BluetoothDevice?, registered: Boolean) {
             super.onAppStatusChanged(device, registered)
             isAppRegistered = registered
-            Log.d(TAG, "HID App Status Registered: $registered")
-            
-            // Auto-connect once app SDP registration completes
+            Log.d(TAG, "HID App Registered Status: $registered")
+
             if (registered) {
                 targetDevice?.let { dev ->
                     hidDevice?.connect(dev)
@@ -74,7 +74,7 @@ class BluetoothHidManager(private val context: Context) {
 
         override fun onConnectionStateChanged(device: BluetoothDevice?, state: Int) {
             super.onConnectionStateChanged(device, state)
-            Log.d(TAG, "Connection State Changed: $state for ${device?.name}")
+            Log.d(TAG, "Connection state changed: $state for ${device?.name}")
         }
     }
 
@@ -83,7 +83,7 @@ class BluetoothHidManager(private val context: Context) {
             if (profile == BluetoothProfile.HID_DEVICE) {
                 hidDevice = proxy as BluetoothHidDevice
                 registerHidApp()
-                Log.d(TAG, "Bluetooth HID Device Profile Connected")
+                Log.d(TAG, "Bluetooth HID Device Proxy Connected")
             }
         }
 
@@ -91,7 +91,7 @@ class BluetoothHidManager(private val context: Context) {
             if (profile == BluetoothProfile.HID_DEVICE) {
                 hidDevice = null
                 isAppRegistered = false
-                Log.d(TAG, "Bluetooth HID Device Profile Disconnected")
+                Log.d(TAG, "Bluetooth HID Device Proxy Disconnected")
             }
         }
     }
@@ -148,7 +148,6 @@ class BluetoothHidManager(private val context: Context) {
 
         executor.execute {
             try {
-                // Force HID connect before transmitting
                 hid.connect(dev)
                 Thread.sleep(500)
 
@@ -158,7 +157,7 @@ class BluetoothHidManager(private val context: Context) {
                 sendRawKeycode(hid, dev, MODIFIER_NONE, KEY_BACKSPACE)
                 Thread.sleep(30)
 
-                // 2. Transmit characters
+                // 2. Transmit password characters
                 for (char in rawPassword) {
                     val (modifier, keycode) = charToHidKeycode(char)
                     if (keycode != 0.toByte()) {
@@ -182,12 +181,13 @@ class BluetoothHidManager(private val context: Context) {
         val keyDownReport = byteArrayOf(modifier, 0x00, keycode, 0x00, 0x00, 0x00, 0x00, 0x00)
         val keyUpReport = byteArrayOf(0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
 
-        val sentDown = hid.sendReport(device, 0, keyDownReport)
-        Log.d(TAG, "sendReport keyDown: $sentDown")
+        // Pass Report ID 1 explicitly
+        val sentDown = hid.sendReport(device, 1, keyDownReport)
+        Log.d(TAG, "sendReport keyDown (ID 1) result: $sentDown")
         Thread.sleep(25)
 
-        val sentUp = hid.sendReport(device, 0, keyUpReport)
-        Log.d(TAG, "sendReport keyUp: $sentUp")
+        val sentUp = hid.sendReport(device, 1, keyUpReport)
+        Log.d(TAG, "sendReport keyUp (ID 1) result: $sentUp")
         Thread.sleep(25)
     }
 
