@@ -53,6 +53,7 @@ class MainActivity : AppCompatActivity() {
         webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
+            allowFileAccess = true // Ensures asset fallback loads local JS/CSS files
             cacheMode = WebSettings.LOAD_NO_CACHE
         }
 
@@ -82,10 +83,30 @@ class MainActivity : AppCompatActivity() {
 
     private fun checkAndRequestPermissions() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val permissionsToRequest = mutableListOf<String>()
+            
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                permissionsToRequest.add(Manifest.permission.BLUETOOTH_CONNECT)
+            }
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
+                permissionsToRequest.add(Manifest.permission.BLUETOOTH_SCAN)
+            }
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_ADVERTISE) != PackageManager.PERMISSION_GRANTED) {
+                permissionsToRequest.add(Manifest.permission.BLUETOOTH_ADVERTISE)
+            }
+
+            if (permissionsToRequest.isNotEmpty()) {
                 ActivityCompat.requestPermissions(
                     this,
-                    arrayOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN),
+                    permissionsToRequest.toTypedArray(),
+                    PERMISSION_REQUEST_CODE
+                )
+            }
+        } else {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(
+                    this,
+                    arrayOf(Manifest.permission.ACCESS_FINE_LOCATION),
                     PERMISSION_REQUEST_CODE
                 )
             }
@@ -118,6 +139,18 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun getAppPin(): String {
             return prefs.getString(KEY_PIN, "") ?: ""
+        }
+
+        @JavascriptInterface
+        fun saveSelectedDeviceAddress(address: String) {
+            mainHandler.post {
+                prefs.edit().putString(KEY_DEVICE_ADDR, address).apply()
+            }
+        }
+
+        @JavascriptInterface
+        fun getSelectedDeviceAddress(): String {
+            return prefs.getString(KEY_DEVICE_ADDR, "") ?: ""
         }
 
         @JavascriptInterface
