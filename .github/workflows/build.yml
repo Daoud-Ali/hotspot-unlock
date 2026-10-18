@@ -30,3 +30,9 @@ jobs:
 
     - name: Build Debug APK
       run: ./gradlew assembleDebug
+
+    - name: Upload APK Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: hotspot-unlock-apk
+        path: app/build/outputs/apk/debug/*.apk
