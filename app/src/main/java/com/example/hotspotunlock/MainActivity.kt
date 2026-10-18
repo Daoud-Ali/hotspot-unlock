@@ -36,12 +36,11 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main)
+        webView = WebView(this)
+setContentView(webView)
 
-        prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        bluetoothManager = BluetoothHidManager(this)
-
-        webView = findViewById(R.id.webView)
+prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+bluetoothManager = BluetoothHidManager(this)
         webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
