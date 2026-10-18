@@ -20,6 +20,8 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
 
 /**
  * Turns the phone into a Bluetooth HID keyboard and types the unlock sequence.
@@ -37,10 +39,18 @@ import java.util.concurrent.Executors
  *     checks every sendReport() result and reports real success / failure.
  */
 @SuppressLint("MissingPermission")
-class BluetoothHidManager(context: Context) {
+class BluetoothHidManager private constructor(context: Context) {
 
     companion object {
         private const val TAG = "BluetoothHidManager"
+
+        @Volatile private var instance: BluetoothHidManager? = null
+
+        /** One manager per process, shared by the Activity and the keep-alive service. */
+        fun get(context: Context): BluetoothHidManager =
+            instance ?: synchronized(this) {
+                instance ?: BluetoothHidManager(context).also { instance = it }
+            }
         private const val REPORT_ID = 1
 
         const val MODIFIER_NONE: Byte = 0x00
@@ -49,11 +59,17 @@ class BluetoothHidManager(context: Context) {
         const val KEY_BACKSPACE: Byte = 0x2A
         const val KEY_SPACE: Byte = 0x2C
 
-        /** Time we give the laptop to show the password box after the "wake" key presses. */
-        private const val WAKE_DELAY_MS = 1500L
+        /** Pause between the two Backspace presses that come before the password. */
+        private const val BACKSPACE_GAP_MS = 120L
+        /** Time we give the laptop to show the password box after the Backspaces (tune if needed). */
+        private const val WAKE_DELAY_MS = 1000L
         private const val CONNECT_TIMEOUT_MS = 15000L
-        private const val KEY_HOLD_MS = 30L
-        private const val KEY_GAP_MS = 30L
+        private const val KEY_HOLD_MS = 20L
+        private const val KEY_GAP_MS = 20L
+        /** How often the phone retries connecting while the laptop is not connected. */
+        private const val RECONNECT_INTERVAL_MS = 6000L
+        /** A connect attempt stuck "connecting" longer than this is cancelled and retried. */
+        private const val CONNECT_STALL_MS = 10000L
 
         // Standard boot-compatible keyboard, Report ID 1:
         //   Input : 1 byte modifiers, 1 byte reserved, 6 bytes key codes  (8 bytes)
@@ -102,6 +118,7 @@ class BluetoothHidManager(context: Context) {
     // IMPORTANT: two separate executors. The callback executor must never be blocked.
     private val callbackExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val sendExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val reconnectExecutor: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
 
     @Volatile private var hidDevice: BluetoothHidDevice? = null
@@ -111,6 +128,9 @@ class BluetoothHidManager(context: Context) {
     @Volatile private var proxyRequested = false
     @Volatile private var lastError: String? = null
     private var receiverRegistered = false
+    @Volatile private var unlocking = false
+    @Volatile private var reconnectScheduled = false
+    private var tickConnectingSince = 0L
 
     // ------------------------------------------------------------------ lifecycle
 
@@ -169,6 +189,9 @@ class BluetoothHidManager(context: Context) {
         }
         callbackExecutor.shutdown()
         sendExecutor.shutdown()
+        reconnectExecutor.shutdown()
+        reconnectScheduled = false
+        synchronized(Companion) { if (instance === this) instance = null }
     }
 
     private fun registerStateReceiver() {
@@ -289,6 +312,7 @@ class BluetoothHidManager(context: Context) {
     }
 
     fun setTargetDevice(address: String) {
+        if (targetDevice?.address == address) return
         targetDevice = try {
             adapter?.getRemoteDevice(address)
         } catch (e: IllegalArgumentException) {
@@ -359,27 +383,82 @@ class BluetoothHidManager(context: Context) {
         }
     }
 
+    /**
+     * Starts the background reconnect loop (called by the keep-alive service). While the laptop is
+     * not connected, the phone retries every few seconds, so the link comes back by itself after
+     * the laptop was shut down / restarted / woken from sleep.
+     */
+    @Synchronized
+    fun enableAutoReconnect() {
+        if (reconnectScheduled) return
+        reconnectScheduled = true
+        reconnectExecutor.scheduleWithFixedDelay(
+            { reconnectTick() }, 2000L, RECONNECT_INTERVAL_MS, TimeUnit.MILLISECONDS
+        )
+    }
+
+    private fun reconnectTick() {
+        try {
+            if (unlocking || !isAppRegistered) return
+            val hid = hidDevice ?: return
+            val dev = targetDevice ?: return
+            when (hid.getConnectionState(dev)) {
+                BluetoothProfile.STATE_CONNECTED -> tickConnectingSince = 0L
+                BluetoothProfile.STATE_CONNECTING -> {
+                    val now = SystemClock.elapsedRealtime()
+                    if (tickConnectingSince == 0L) {
+                        tickConnectingSince = now
+                    } else if (now - tickConnectingSince > CONNECT_STALL_MS) {
+                        Log.d(TAG, "connect stalled, cancelling and retrying")
+                        hid.disconnect(dev)
+                        tickConnectingSince = 0L
+                    }
+                }
+                BluetoothProfile.STATE_DISCONNECTED -> {
+                    tickConnectingSince = 0L
+                    Log.d(TAG, "auto-reconnect: connect() to ${dev.name}")
+                    hid.connect(dev)
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "reconnect tick failed", e)
+        }
+    }
+
     /** Blocks (on the send thread) until the laptop is really connected, retrying connect(). */
     private fun ensureConnected(hid: BluetoothHidDevice, dev: BluetoothDevice): Boolean {
+        // Already connected (kept alive by the service): no waiting at all.
+        if (hid.getConnectionState(dev) == BluetoothProfile.STATE_CONNECTED) return true
+
         val start = SystemClock.elapsedRealtime()
         var lastAttempt = 0L
+        var connectingSince = 0L
         while (SystemClock.elapsedRealtime() - start < CONNECT_TIMEOUT_MS) {
+            val now = SystemClock.elapsedRealtime()
             when (hid.getConnectionState(dev)) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     Thread.sleep(300) // let Windows finish bringing the HID device up
                     return true
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
-                    val now = SystemClock.elapsedRealtime()
+                    connectingSince = 0L
                     if (now - lastAttempt > 3000) {
                         Log.d(TAG, "connect() to ${dev.name}")
                         hid.connect(dev)
                         lastAttempt = now
                     }
                 }
-                else -> { /* connecting: just wait */ }
+                else -> { // connecting
+                    if (connectingSince == 0L) {
+                        connectingSince = now
+                    } else if (now - connectingSince > 6000) {
+                        hid.disconnect(dev) // stuck: cancel, the loop will retry
+                        connectingSince = 0L
+                        lastAttempt = 0L
+                    }
+                }
             }
-            Thread.sleep(150)
+            Thread.sleep(100)
         }
         return false
     }
@@ -470,6 +549,7 @@ class BluetoothHidManager(context: Context) {
         }
 
         sendExecutor.execute {
+            unlocking = true
             try {
                 if (!ensureConnected(hid!!, dev!!)) {
                     finish(
@@ -480,10 +560,10 @@ class BluetoothHidManager(context: Context) {
                     return@execute
                 }
 
-                // Wake the screen / dismiss the lock splash with harmless Shift taps.
-                sendKey(hid, dev, MODIFIER_SHIFT, 0)
-                Thread.sleep(250)
-                sendKey(hid, dev, MODIFIER_SHIFT, 0)
+                // Always press Backspace twice first (wakes the screen / clears the field), then type.
+                sendKey(hid, dev, MODIFIER_NONE, KEY_BACKSPACE)
+                Thread.sleep(BACKSPACE_GAP_MS)
+                sendKey(hid, dev, MODIFIER_NONE, KEY_BACKSPACE)
                 Thread.sleep(WAKE_DELAY_MS)
 
                 for (ch in rawPassword) {
@@ -503,6 +583,8 @@ class BluetoothHidManager(context: Context) {
             } catch (e: Exception) {
                 Log.e(TAG, "Error transmitting keystrokes", e)
                 finish(false, "Error sending keystrokes: ${e.message}")
+            } finally {
+                unlocking = false
             }
         }
     }
