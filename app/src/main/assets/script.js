@@ -32,7 +32,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     let savedPwd = getNativeData("getPassword");
     if (savedPwd) {
-      windowsPassword.value = savedPwd; // Raw string loaded (no trim)
+      windowsPassword.value = savedPwd; // Raw string loaded
     }
 
     refreshDeviceList();
@@ -81,7 +81,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // SAVE PASSWORD (RAW STRING - PRESERVES ALL SPACES)
   savePasswordBtn.addEventListener("click", () => {
-    const rawPwd = windowsPassword.value; // DO NOT call .trim()
+    const rawPwd = windowsPassword.value;
     callNative("savePassword", rawPwd);
     alert("Password saved successfully!");
   });
@@ -113,6 +113,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const selectedName = e.target.options[e.target.selectedIndex].text;
     if (selectedAddress) {
       callNative("setSelectedDevice", selectedAddress);
+      callNative("saveSelectedDeviceAddress", selectedAddress); // Persist MAC selection
       if (activeDeviceName) {
         activeDeviceName.textContent = selectedName;
       }
@@ -121,14 +122,27 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function refreshDeviceList() {
     let devicesJson = getNativeData("getPairedDevices");
+    let savedMac = getNativeData("getSelectedDeviceAddress");
+
     if (devicesJson) {
       try {
         const devices = JSON.parse(devicesJson);
         deviceSelect.innerHTML = '<option value="">Select Paired Laptop...</option>';
+        
         devices.forEach((dev) => {
           const opt = document.createElement("option");
           opt.value = dev.address;
           opt.textContent = dev.name;
+          
+          // Pre-select previously saved device
+          if (savedMac && dev.address === savedMac) {
+            opt.selected = true;
+            callNative("setSelectedDevice", dev.address);
+            if (activeDeviceName) {
+              activeDeviceName.textContent = dev.name;
+            }
+          }
+          
           deviceSelect.appendChild(opt);
         });
       } catch (e) {
@@ -159,9 +173,10 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     }
     
-    // Always mirror to localStorage using matching keys for web/offline fallback
+    // Always mirror to localStorage using matching keys
     if (funcName === "savePassword") localStorage.setItem("windows_password", param);
     if (funcName === "setAppPin") localStorage.setItem("app_pin", param);
+    if (funcName === "saveSelectedDeviceAddress") localStorage.setItem("selected_device_mac", param);
   }
 
   function getNativeData(funcName) {
@@ -177,6 +192,7 @@ document.addEventListener("DOMContentLoaded", () => {
     // Fallback to matching localStorage keys
     if (funcName === "getPassword") return localStorage.getItem("windows_password") || "";
     if (funcName === "getAppPin") return localStorage.getItem("app_pin") || "";
+    if (funcName === "getSelectedDeviceAddress") return localStorage.getItem("selected_device_mac") || "";
     return null;
   }
 });
