@@ -30,32 +30,31 @@ class BluetoothHidManager(private val context: Context) {
         private const val KEY_ENTER: Byte = 0x28
         private const val KEY_SPACE: Byte = 0x2C
 
-        // Standard HID Keyboard Report Descriptor
+        // Fixed Standard HID Keyboard Descriptor (No Report ID required)
         private val HID_DESCRIPTOR = byteArrayOf(
             0x05.toByte(), 0x01.toByte(), // USAGE_PAGE (Generic Desktop)
             0x09.toByte(), 0x06.toByte(), // USAGE (Keyboard)
             0xA1.toByte(), 0x01.toByte(), // COLLECTION (Application)
-            0x85.toByte(), 0x01.toByte(), // REPORT_ID (1)
-            0x05.toByte(), 0x07.toByte(), // USAGE_PAGE (Keyboard)
-            0x19.toByte(), 0xE0.toByte(), // USAGE_MINIMUM (KB LeftControl)
-            0x29.toByte(), 0xE7.toByte(), // USAGE_MAXIMUM (KB Right GUI)
-            0x15.toByte(), 0x00.toByte(), // LOGICAL_MINIMUM (0)
-            0x25.toByte(), 0x01.toByte(), // LOGICAL_MAXIMUM (1)
-            0x75.toByte(), 0x01.toByte(), // REPORT_SIZE (1)
-            0x95.toByte(), 0x08.toByte(), // REPORT_COUNT (8)
-            0x81.toByte(), 0x02.toByte(), // INPUT (Data,Var,Abs)
-            0x95.toByte(), 0x01.toByte(), // REPORT_COUNT (1)
-            0x75.toByte(), 0x08.toByte(), // REPORT_SIZE (8)
-            0x81.toByte(), 0x01.toByte(), // INPUT (Cnst,Ary,Abs)
-            0x95.toByte(), 0x06.toByte(), // REPORT_COUNT (6)
-            0x75.toByte(), 0x08.toByte(), // REPORT_SIZE (8)
-            0x15.toByte(), 0x00.toByte(), // LOGICAL_MINIMUM (0)
-            0x25.toByte(), 0x65.toByte(), // LOGICAL_MAXIMUM (101)
-            0x05.toByte(), 0x07.toByte(), // USAGE_PAGE (Keyboard)
-            0x19.toByte(), 0x00.toByte(), // USAGE_MINIMUM (0)
-            0x29.toByte(), 0x65.toByte(), // USAGE_MAXIMUM (101)
-            0x81.toByte(), 0x00.toByte(), // INPUT (Data,Ary,Abs)
-            0xC0.toByte()                 // END_COLLECTION
+            0x05.toByte(), 0x07.toByte(), //   USAGE_PAGE (Keyboard)
+            0x19.toByte(), 0xE0.toByte(), //   USAGE_MINIMUM (KB LeftControl)
+            0x29.toByte(), 0xE7.toByte(), //   USAGE_MAXIMUM (KB Right GUI)
+            0x15.toByte(), 0x00.toByte(), //   LOGICAL_MINIMUM (0)
+            0x25.toByte(), 0x01.toByte(), //   LOGICAL_MAXIMUM (1)
+            0x75.toByte(), 0x01.toByte(), //   REPORT_SIZE (1)
+            0x95.toByte(), 0x08.toByte(), //   REPORT_COUNT (8)
+            0x81.toByte(), 0x02.toByte(), //   INPUT (Data,Var,Abs)
+            0x95.toByte(), 0x01.toByte(), //   REPORT_COUNT (1)
+            0x75.toByte(), 0x08.toByte(), //   REPORT_SIZE (8)
+            0x81.toByte(), 0x01.toByte(), //   INPUT (Cnst,Ary,Abs)
+            0x95.toByte(), 0x06.toByte(), //   REPORT_COUNT (6)
+            0x75.toByte(), 0x08.toByte(), //   REPORT_SIZE (8)
+            0x15.toByte(), 0x00.toByte(), //   LOGICAL_MINIMUM (0)
+            0x25.toByte(), 0x65.toByte(), //   LOGICAL_MAXIMUM (101)
+            0x05.toByte(), 0x07.toByte(), //   USAGE_PAGE (Keyboard)
+            0x19.toByte(), 0x00.toByte(), //   USAGE_MINIMUM (0)
+            0x29.toByte(), 0x65.toByte(), //   USAGE_MAXIMUM (101)
+            0x81.toByte(), 0x00.toByte(), //   INPUT (Data,Ary,Abs)
+            0xC0.toByte()                  // END_COLLECTION
         )
     }
 
@@ -63,12 +62,12 @@ class BluetoothHidManager(private val context: Context) {
         override fun onAppStatusChanged(device: BluetoothDevice?, registered: Boolean) {
             super.onAppStatusChanged(device, registered)
             isAppRegistered = registered
-            Log.d(TAG, "HID App Status Registered: $registered")
+            Log.d(TAG, "HID App Registered: $registered")
         }
 
         override fun onConnectionStateChanged(device: BluetoothDevice?, state: Int) {
             super.onConnectionStateChanged(device, state)
-            Log.d(TAG, "Connection state changed: $state for device: ${device?.name}")
+            Log.d(TAG, "Connection State Changed: $state for ${device?.name}")
         }
     }
 
@@ -114,7 +113,6 @@ class BluetoothHidManager(private val context: Context) {
         val device = bluetoothAdapter?.getRemoteDevice(address)
         if (device != null) {
             targetDevice = device
-            // Attempt HID level connection
             hidDevice?.connect(device)
             return true
         }
@@ -141,17 +139,17 @@ class BluetoothHidManager(private val context: Context) {
 
         executor.execute {
             try {
-                // Connect if state is disconnected
+                // Ensure active HID connection
                 hid.connect(dev)
-                Thread.sleep(300)
+                Thread.sleep(500)
 
-                // 1. Wake Delay & Clear lock screen prompt
+                // 1. Wake & Clear prompt
                 sendRawKeycode(hid, dev, MODIFIER_NONE, KEY_BACKSPACE)
-                Thread.sleep(20)
+                Thread.sleep(30)
                 sendRawKeycode(hid, dev, MODIFIER_NONE, KEY_BACKSPACE)
-                Thread.sleep(20)
+                Thread.sleep(30)
 
-                // 2. Process complete password character set (letters, digits, symbols)
+                // 2. Transmit characters
                 for (char in rawPassword) {
                     val (modifier, keycode) = charToHidKeycode(char)
                     if (keycode != 0.toByte()) {
@@ -159,10 +157,8 @@ class BluetoothHidManager(private val context: Context) {
                     }
                 }
 
-                // 3. Pause before Enter
+                // 3. Pause & Enter
                 Thread.sleep(100)
-
-                // 4. Transmit Enter
                 sendRawKeycode(hid, dev, MODIFIER_NONE, KEY_ENTER)
 
                 mainHandler.post { onComplete(true) }
@@ -174,13 +170,15 @@ class BluetoothHidManager(private val context: Context) {
     }
 
     private fun sendRawKeycode(hid: BluetoothHidDevice, device: BluetoothDevice, modifier: Byte, keycode: Byte) {
+        // Standard 8-byte HID keyboard report format
         val keyDownReport = byteArrayOf(modifier, 0x00, keycode, 0x00, 0x00, 0x00, 0x00, 0x00)
         val keyUpReport = byteArrayOf(0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
 
-        hid.sendReport(device, 1, keyDownReport)
-        Thread.sleep(15)
-        hid.sendReport(device, 1, keyUpReport)
-        Thread.sleep(15)
+        // Passing report ID 0 since report ID is omitted from descriptor
+        hid.sendReport(device, 0, keyDownReport)
+        Thread.sleep(20)
+        hid.sendReport(device, 0, keyUpReport)
+        Thread.sleep(20)
     }
 
     private fun charToHidKeycode(c: Char): Pair<Byte, Byte> {
