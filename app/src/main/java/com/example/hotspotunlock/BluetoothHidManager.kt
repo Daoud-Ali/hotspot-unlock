@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothHidDevice
+import android.bluetooth.BluetoothHidDeviceAppSdpSettings
 import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.os.Handler
@@ -19,19 +20,63 @@ class BluetoothHidManager(private val context: Context) {
     private var targetDevice: BluetoothDevice? = null
     private val executor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var isAppRegistered = false
 
     companion object {
         private const val TAG = "BluetoothHidManager"
-        private const val MODIFIER_NONE: Byte = 0
+        private const val MODIFIER_NONE: Byte = 0x00
+        private const val MODIFIER_SHIFT: Byte = 0x02
         private const val KEY_BACKSPACE: Byte = 0x2A
         private const val KEY_ENTER: Byte = 0x28
         private const val KEY_SPACE: Byte = 0x2C
+
+        // Standard HID Keyboard Report Descriptor
+        private val HID_DESCRIPTOR = byteArrayOf(
+            0x05.toByte(), 0x01.toByte(), // USAGE_PAGE (Generic Desktop)
+            0x09.toByte(), 0x06.toByte(), // USAGE (Keyboard)
+            0xA1.toByte(), 0x01.toByte(), // COLLECTION (Application)
+            0x85.toByte(), 0x01.toByte(), // REPORT_ID (1)
+            0x05.toByte(), 0x07.toByte(), // USAGE_PAGE (Keyboard)
+            0x19.toByte(), 0xE0.toByte(), // USAGE_MINIMUM (KB LeftControl)
+            0x29.toByte(), 0xE7.toByte(), // USAGE_MAXIMUM (KB Right GUI)
+            0x15.toByte(), 0x00.toByte(), // LOGICAL_MINIMUM (0)
+            0x25.toByte(), 0x01.toByte(), // LOGICAL_MAXIMUM (1)
+            0x75.toByte(), 0x01.toByte(), // REPORT_SIZE (1)
+            0x95.toByte(), 0x08.toByte(), // REPORT_COUNT (8)
+            0x81.toByte(), 0x02.toByte(), // INPUT (Data,Var,Abs)
+            0x95.toByte(), 0x01.toByte(), // REPORT_COUNT (1)
+            0x75.toByte(), 0x08.toByte(), // REPORT_SIZE (8)
+            0x81.toByte(), 0x01.toByte(), // INPUT (Cnst,Ary,Abs)
+            0x95.toByte(), 0x06.toByte(), // REPORT_COUNT (6)
+            0x75.toByte(), 0x08.toByte(), // REPORT_SIZE (8)
+            0x15.toByte(), 0x00.toByte(), // LOGICAL_MINIMUM (0)
+            0x25.toByte(), 0x65.toByte(), // LOGICAL_MAXIMUM (101)
+            0x05.toByte(), 0x07.toByte(), // USAGE_PAGE (Keyboard)
+            0x19.toByte(), 0x00.toByte(), // USAGE_MINIMUM (0)
+            0x29.toByte(), 0x65.toByte(), // USAGE_MAXIMUM (101)
+            0x81.toByte(), 0x00.toByte(), // INPUT (Data,Ary,Abs)
+            0xC0.toByte()                 // END_COLLECTION
+        )
+    }
+
+    private val callback = object : BluetoothHidDevice.Callback() {
+        override fun onAppStatusChanged(device: BluetoothDevice?, registered: Boolean) {
+            super.onAppStatusChanged(device, registered)
+            isAppRegistered = registered
+            Log.d(TAG, "HID App Status Registered: $registered")
+        }
+
+        override fun onConnectionStateChanged(device: BluetoothDevice?, state: Int) {
+            super.onConnectionStateChanged(device, state)
+            Log.d(TAG, "Connection state changed: $state for device: ${device?.name}")
+        }
     }
 
     private val profileListener = object : BluetoothProfile.ServiceListener {
         override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
             if (profile == BluetoothProfile.HID_DEVICE) {
                 hidDevice = proxy as BluetoothHidDevice
+                registerHidApp()
                 Log.d(TAG, "Bluetooth HID Device Profile Connected")
             }
         }
@@ -39,6 +84,7 @@ class BluetoothHidManager(private val context: Context) {
         override fun onServiceDisconnected(profile: Int) {
             if (profile == BluetoothProfile.HID_DEVICE) {
                 hidDevice = null
+                isAppRegistered = false
                 Log.d(TAG, "Bluetooth HID Device Profile Disconnected")
             }
         }
@@ -46,6 +92,18 @@ class BluetoothHidManager(private val context: Context) {
 
     init {
         bluetoothAdapter?.getProfileProxy(context, profileListener, BluetoothProfile.HID_DEVICE)
+    }
+
+    private fun registerHidApp() {
+        val hid = hidDevice ?: return
+        val sdp = BluetoothHidDeviceAppSdpSettings(
+            "Hotspot Unlocker",
+            "Android HID Keyboard",
+            "Android",
+            BluetoothHidDevice.SUBCLASS1_KEYBOARD,
+            HID_DESCRIPTOR
+        )
+        hid.registerApp(sdp, null, null, executor, callback)
     }
 
     fun getPairedDevices(): List<BluetoothDevice> {
@@ -56,6 +114,8 @@ class BluetoothHidManager(private val context: Context) {
         val device = bluetoothAdapter?.getRemoteDevice(address)
         if (device != null) {
             targetDevice = device
+            // Attempt HID level connection
+            hidDevice?.connect(device)
             return true
         }
         return false
@@ -69,14 +129,6 @@ class BluetoothHidManager(private val context: Context) {
         return targetDevice?.name ?: "No Device Selected"
     }
 
-    /**
-     * Executes unlock sequence safely off the main thread:
-     * 1. 300ms wake delay
-     * 2. Exactly TWO raw HID Backspaces (0x2A)
-     * 3. Transmits raw password string (preserving all digits/spaces)
-     * 4. 100ms pause
-     * 5. Enter (0x28)
-     */
     fun sendUnlockSequence(rawPassword: String, onComplete: (Boolean) -> Unit) {
         val dev = targetDevice
         val hid = hidDevice
@@ -89,28 +141,29 @@ class BluetoothHidManager(private val context: Context) {
 
         executor.execute {
             try {
-                // 1. 300ms Wake Delay
+                // Connect if state is disconnected
+                hid.connect(dev)
                 Thread.sleep(300)
 
-                // 2. Transmit EXACTLY two raw HID Backspaces (0x2A)
-                sendRawKeycode(hid, dev, KEY_BACKSPACE)
-                Thread.sleep(10)
-                sendRawKeycode(hid, dev, KEY_BACKSPACE)
-                Thread.sleep(10)
+                // 1. Wake Delay & Clear lock screen prompt
+                sendRawKeycode(hid, dev, MODIFIER_NONE, KEY_BACKSPACE)
+                Thread.sleep(20)
+                sendRawKeycode(hid, dev, MODIFIER_NONE, KEY_BACKSPACE)
+                Thread.sleep(20)
 
-                // 3. Process raw password (DO NOT CALL .trim())
+                // 2. Process complete password character set (letters, digits, symbols)
                 for (char in rawPassword) {
-                    val keycode = charToHidKeycode(char)
+                    val (modifier, keycode) = charToHidKeycode(char)
                     if (keycode != 0.toByte()) {
-                        sendRawKeycode(hid, dev, keycode)
+                        sendRawKeycode(hid, dev, modifier, keycode)
                     }
                 }
 
-                // 4. 100ms Pause before Enter
+                // 3. Pause before Enter
                 Thread.sleep(100)
 
-                // 5. Transmit Enter keycode (0x28)
-                sendRawKeycode(hid, dev, KEY_ENTER)
+                // 4. Transmit Enter
+                sendRawKeycode(hid, dev, MODIFIER_NONE, KEY_ENTER)
 
                 mainHandler.post { onComplete(true) }
             } catch (e: Exception) {
@@ -120,8 +173,8 @@ class BluetoothHidManager(private val context: Context) {
         }
     }
 
-    private fun sendRawKeycode(hid: BluetoothHidDevice, device: BluetoothDevice, keycode: Byte) {
-        val keyDownReport = byteArrayOf(MODIFIER_NONE, 0x00, keycode, 0x00, 0x00, 0x00, 0x00, 0x00)
+    private fun sendRawKeycode(hid: BluetoothHidDevice, device: BluetoothDevice, modifier: Byte, keycode: Byte) {
+        val keyDownReport = byteArrayOf(modifier, 0x00, keycode, 0x00, 0x00, 0x00, 0x00, 0x00)
         val keyUpReport = byteArrayOf(0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
 
         hid.sendReport(device, 1, keyDownReport)
@@ -130,20 +183,36 @@ class BluetoothHidManager(private val context: Context) {
         Thread.sleep(15)
     }
 
-    private fun charToHidKeycode(c: Char): Byte {
+    private fun charToHidKeycode(c: Char): Pair<Byte, Byte> {
         return when (c) {
-            '1' -> 0x1E
-            '2' -> 0x1F
-            '3' -> 0x20
-            '4' -> 0x21
-            '5' -> 0x22
-            '6' -> 0x23
-            '7' -> 0x24
-            '8' -> 0x25
-            '9' -> 0x26
-            '0' -> 0x27
-            ' ' -> KEY_SPACE
-            else -> 0x00
+            in 'a'..'z' -> Pair(MODIFIER_NONE, (0x04 + (c - 'a')).toByte())
+            in 'A'..'Z' -> Pair(MODIFIER_SHIFT, (0x04 + (c - 'A')).toByte())
+            '1' -> Pair(MODIFIER_NONE, 0x1E)
+            '!' -> Pair(MODIFIER_SHIFT, 0x1E)
+            '2' -> Pair(MODIFIER_NONE, 0x1F)
+            '@' -> Pair(MODIFIER_SHIFT, 0x1F)
+            '3' -> Pair(MODIFIER_NONE, 0x20)
+            '#' -> Pair(MODIFIER_SHIFT, 0x20)
+            '4' -> Pair(MODIFIER_NONE, 0x21)
+            '$' -> Pair(MODIFIER_SHIFT, 0x21)
+            '5' -> Pair(MODIFIER_NONE, 0x22)
+            '%' -> Pair(MODIFIER_SHIFT, 0x22)
+            '6' -> Pair(MODIFIER_NONE, 0x23)
+            '^' -> Pair(MODIFIER_SHIFT, 0x23)
+            '7' -> Pair(MODIFIER_NONE, 0x24)
+            '&' -> Pair(MODIFIER_SHIFT, 0x24)
+            '8' -> Pair(MODIFIER_NONE, 0x25)
+            '*' -> Pair(MODIFIER_SHIFT, 0x25)
+            '9' -> Pair(MODIFIER_NONE, 0x26)
+            '(' -> Pair(MODIFIER_SHIFT, 0x26)
+            '0' -> Pair(MODIFIER_NONE, 0x27)
+            ')' -> Pair(MODIFIER_SHIFT, 0x27)
+            ' ' -> Pair(MODIFIER_NONE, KEY_SPACE)
+            '-' -> Pair(MODIFIER_NONE, 0x2D)
+            '_' -> Pair(MODIFIER_SHIFT, 0x2D)
+            '=' -> Pair(MODIFIER_NONE, 0x2E)
+            '+' -> Pair(MODIFIER_SHIFT, 0x2E)
+            else -> Pair(MODIFIER_NONE, 0x00)
         }
     }
 }
