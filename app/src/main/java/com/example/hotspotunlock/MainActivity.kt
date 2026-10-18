@@ -58,7 +58,7 @@ class MainActivity : AppCompatActivity() {
         prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
         // The constructor no longer touches Bluetooth, so this is safe before permissions exist.
-        bluetoothManager = BluetoothHidManager(this)
+        bluetoothManager = BluetoothHidManager.get(this) // shared with HidService
         prefs.getString(KEY_DEVICE_ADDR, null)
             ?.takeIf { it.isNotEmpty() }
             ?.let { bluetoothManager.setTargetDevice(it) }
@@ -91,12 +91,16 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (missingPermissions().isEmpty()) bluetoothManager.start()
+        if (missingPermissions().isEmpty()) startBluetooth()
     }
 
-    override fun onDestroy() {
-        if (isFinishing) bluetoothManager.stop()
-        super.onDestroy()
+    // NOTE: no stop() in onDestroy any more. HidService keeps the connection alive in the
+    // background; use the "Stop" button in its notification to shut it down.
+
+    /** Starts the HID profile and the background keep-alive / auto-reconnect service. */
+    private fun startBluetooth() {
+        bluetoothManager.start()
+        ContextCompat.startForegroundService(this, Intent(this, HidService::class.java))
     }
 
     // ------------------------------------------------------------------ permissions
@@ -118,11 +122,17 @@ class MainActivity : AppCompatActivity() {
         }
 
     private fun ensurePermissionsThenStart() {
-        val missing = missingPermissions()
-        if (missing.isEmpty()) {
-            bluetoothManager.start()
-        } else {
-            ActivityCompat.requestPermissions(this, missing.toTypedArray(), PERMISSION_REQUEST_CODE)
+        val toRequest = missingPermissions().toMutableList()
+        if (toRequest.isEmpty()) startBluetooth()
+        // Android 13+: lets the "connection ready" notification (with its Stop button) show.
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            toRequest.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        if (toRequest.isNotEmpty()) {
+            ActivityCompat.requestPermissions(this, toRequest.toTypedArray(), PERMISSION_REQUEST_CODE)
         }
     }
 
@@ -131,8 +141,8 @@ class MainActivity : AppCompatActivity() {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode != PERMISSION_REQUEST_CODE) return
-        if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
-            bluetoothManager.start() // <- this was the missing step
+        if (missingPermissions().isEmpty()) {
+            startBluetooth() // <- Bluetooth only starts once permissions exist
             toast("Bluetooth ready. Tap Refresh Devices in Settings.")
         } else {
             toast("Bluetooth permissions are required for the app to work.")
@@ -192,7 +202,7 @@ class MainActivity : AppCompatActivity() {
             ensurePermissionsThenStart()
             return
         }
-        bluetoothManager.start() // HID service record must be registered BEFORE Windows pairs
+        startBluetooth() // HID service record must be registered BEFORE Windows pairs
         val intent = Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE)
             .putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 300)
         startActivity(intent)
