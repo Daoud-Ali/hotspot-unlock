@@ -120,8 +120,14 @@ document.addEventListener("DOMContentLoaded", () => {
   if (discoverableBtn) discoverableBtn.addEventListener("click", () => nativeOrWarn("makeDiscoverable"));
   if (btSettingsBtn) btSettingsBtn.addEventListener("click", () => nativeOrWarn("openBluetoothSettings"));
   if (diagnosticsBtn) diagnosticsBtn.addEventListener("click", () => {
-    const d = getNativeData("getDiagnostics");
-    alert(d || "Diagnostics need the latest app version.");
+    const d = getNativeData("getDiagnostics") || "Diagnostics need the latest app version.";
+    const out = document.getElementById("diagnostics-output");
+    if (out) {            // shown on the page itself (works even if alert() is blocked)
+      out.textContent = d;
+      out.classList.remove("hidden");
+    } else {
+      alert(d);
+    }
   });
 
   // Called by the app after every unlock attempt with the REAL result
