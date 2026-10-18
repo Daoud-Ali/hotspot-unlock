@@ -37,6 +37,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
     refreshDeviceList();
     checkBluetoothStatus();
+
+    // Periodically update Bluetooth status every 3 seconds
+    setInterval(checkBluetoothStatus, 3000);
   }
 
   // APP PIN LOCK LOGIC
@@ -110,7 +113,9 @@ document.addEventListener("DOMContentLoaded", () => {
     const selectedName = e.target.options[e.target.selectedIndex].text;
     if (selectedAddress) {
       callNative("setSelectedDevice", selectedAddress);
-      activeDeviceName.textContent = selectedName;
+      if (activeDeviceName) {
+        activeDeviceName.textContent = selectedName;
+      }
     }
   });
 
@@ -134,15 +139,17 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function checkBluetoothStatus() {
     let status = getNativeData("getBluetoothStatus") || "Disconnected";
-    btStatus.textContent = "Status: " + status;
-    if (status.toLowerCase().includes("connect")) {
-      btStatus.classList.add("connected");
-    } else {
-      btStatus.classList.remove("connected");
+    if (btStatus) {
+      btStatus.textContent = "Status: " + status;
+      if (status.toLowerCase().includes("connect")) {
+        btStatus.classList.add("connected");
+      } else {
+        btStatus.classList.remove("connected");
+      }
     }
   }
 
-  // BRIDGE HELPERS WITH LOCALSTORAGE FALLBACK
+  // BRIDGE HELPERS WITH SYNCHRONIZED STORAGE KEYS
   function callNative(funcName, param) {
     if (window.AndroidInterface && window.AndroidInterface[funcName]) {
       if (param !== undefined) {
@@ -150,22 +157,26 @@ document.addEventListener("DOMContentLoaded", () => {
       } else {
         window.AndroidInterface[funcName]();
       }
-    } else {
-      // Fallback for browser testing
-      if (funcName === "savePassword") localStorage.setItem("windows_pwd", param);
-      if (funcName === "setAppPin") localStorage.setItem("app_pin", param);
-      console.log(`Native call: ${funcName}(${param || ""})`);
     }
+    
+    // Always mirror to localStorage using matching keys for web/offline fallback
+    if (funcName === "savePassword") localStorage.setItem("windows_password", param);
+    if (funcName === "setAppPin") localStorage.setItem("app_pin", param);
   }
 
   function getNativeData(funcName) {
+    let nativeValue = null;
     if (window.AndroidInterface && window.AndroidInterface[funcName]) {
-      return window.AndroidInterface[funcName]();
-    } else {
-      // Fallback for browser testing
-      if (funcName === "getPassword") return localStorage.getItem("windows_pwd") || "";
-      if (funcName === "getAppPin") return localStorage.getItem("app_pin") || "";
-      return null;
+      nativeValue = window.AndroidInterface[funcName]();
     }
+
+    if (nativeValue !== null && nativeValue !== undefined && nativeValue !== "") {
+      return nativeValue;
+    }
+
+    // Fallback to matching localStorage keys
+    if (funcName === "getPassword") return localStorage.getItem("windows_password") || "";
+    if (funcName === "getAppPin") return localStorage.getItem("app_pin") || "";
+    return null;
   }
 });
