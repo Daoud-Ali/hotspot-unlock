@@ -1,8 +1,11 @@
 package com.example.hotspotunlock
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -13,6 +16,7 @@ import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.biometric.BiometricPrompt
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import org.json.JSONArray
 import org.json.JSONObject
@@ -23,6 +27,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var bluetoothManager: BluetoothHidManager
     private lateinit var prefs: SharedPreferences
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val PERMISSION_REQUEST_CODE = 101
 
     companion object {
         private const val PREFS_NAME = "HotspotUnlockPrefs"
@@ -36,11 +41,15 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
         webView = WebView(this)
-setContentView(webView)
+        setContentView(webView)
 
-prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-bluetoothManager = BluetoothHidManager(this)
+        prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        bluetoothManager = BluetoothHidManager(this)
+
+        checkAndRequestPermissions()
+
         webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
@@ -57,7 +66,6 @@ bluetoothManager = BluetoothHidManager(this)
                 description: String?,
                 failingUrl: String?
             ) {
-                // Fallback to local assets if Cloudflare network fails
                 if (failingUrl == PRIMARY_URL) {
                     webView.loadUrl(FALLBACK_URL)
                 }
@@ -66,10 +74,21 @@ bluetoothManager = BluetoothHidManager(this)
 
         webView.loadUrl(PRIMARY_URL)
 
-        // Restore saved target device
         val savedAddr = prefs.getString(KEY_DEVICE_ADDR, null)
         if (!savedAddr.isNullOrEmpty()) {
             bluetoothManager.setTargetDevice(savedAddr)
+        }
+    }
+
+    private fun checkAndRequestPermissions() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(
+                    this,
+                    arrayOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN),
+                    PERMISSION_REQUEST_CODE
+                )
+            }
         }
     }
 
@@ -78,7 +97,6 @@ bluetoothManager = BluetoothHidManager(this)
         @JavascriptInterface
         fun savePassword(rawPassword: String) {
             mainHandler.post {
-                // Preserve exact raw input (do not call .trim())
                 prefs.edit().putString(KEY_PASSWORD, rawPassword).apply()
                 Toast.makeText(this@MainActivity, "Password saved locally", Toast.LENGTH_SHORT).show()
             }
