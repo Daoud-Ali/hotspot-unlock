@@ -22,11 +22,11 @@ jobs:
     - name: Setup Gradle
       uses: gradle/actions/setup-gradle@v3
 
-    - name: Build Debug APK
-      run: gradle assembleDebug
+    - name: Generate Stable Gradle Wrapper
+      run: gradle wrapper --gradle-version 8.5
 
-    - name: Upload APK Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: hotspot-unlock-apk
-        path: app/build/outputs/apk/debug/app-debug.apk
+    - name: Make Wrapper Executable
+      run: chmod +x gradlew
+
+    - name: Build Debug APK
+      run: ./gradlew assembleDebug
