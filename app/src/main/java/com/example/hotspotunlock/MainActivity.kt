@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
@@ -21,11 +22,13 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import org.json.JSONArray
 import org.json.JSONObject
+import java.security.MessageDigest
 
 class MainActivity : AppCompatActivity() {
 
@@ -42,9 +45,13 @@ class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private lateinit var prefs: SharedPreferences
     private lateinit var bluetoothManager: BluetoothHidManager
+    private lateinit var appLock: AppLock
     private val mainHandler = Handler(Looper.getMainLooper())
 
     @Volatile private var unlockInProgress = false
+    private var promptActive = false
+    /** Set after a successful "Forgot PIN" fingerprint scan; lets the page set a new PIN once. */
+    @Volatile private var resetAuthorizedUntil = 0L
 
     // ------------------------------------------------------------------ lifecycle
 
@@ -56,6 +63,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(webView)
 
         prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        appLock = AppLock(prefs)
 
         // The constructor no longer touches Bluetooth, so this is safe before permissions exist.
         bluetoothManager = BluetoothHidManager.get(this) // shared with HidService
@@ -151,30 +159,124 @@ class MainActivity : AppCompatActivity() {
 
     // ------------------------------------------------------------------ biometric + unlock
 
-    private fun showBiometricPrompt() {
-        val prompt = BiometricPrompt(
+    private fun isFingerprintAvailable(): Boolean =
+        BiometricManager.from(this)
+            .canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_WEAK) ==
+            BiometricManager.BIOMETRIC_SUCCESS
+
+    private fun lockMessage(ms: Long): String =
+        "Too many wrong tries. Try again in ${(ms + 999) / 1000} seconds."
+
+    /**
+     * One fingerprint prompt for three jobs:
+     *   "login"  - open the app          "reset" - Forgot PIN
+     *   "unlock" - send the password to the laptop
+     * All three share the wrong-try lockout in [AppLock].
+     */
+    private fun showFingerprintPrompt(purpose: String) {
+        if (promptActive) return
+        val remaining = appLock.remainingMs()
+        if (remaining > 0) {
+            reportAuth(purpose, false, "locked", lockMessage(remaining))
+            return
+        }
+        if (!isFingerprintAvailable()) {
+            reportAuth(purpose, false, "unavailable", "Fingerprint isn't set up on this phone.")
+            return
+        }
+
+        promptActive = true
+        var failuresInPrompt = 0
+        var cancelledByLock = false
+        lateinit var prompt: BiometricPrompt
+
+        prompt = BiometricPrompt(
             this,
             ContextCompat.getMainExecutor(this),
             object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                    executeUnlockTransmission()
+                    promptActive = false
+                    appLock.registerSuccess()
+                    reportAuth(purpose, true, "ok", "")
+                }
+
+                // A finger was scanned but not recognised.
+                override fun onAuthenticationFailed() {
+                    failuresInPrompt++
+                    if (appLock.registerFailure() > 0) {
+                        cancelledByLock = true
+                        prompt.cancelAuthentication() // closes the dialog; onAuthenticationError follows
+                    }
                 }
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                    if (errorCode != BiometricPrompt.ERROR_NEGATIVE_BUTTON &&
-                        errorCode != BiometricPrompt.ERROR_USER_CANCELED
-                    ) {
-                        toast("Biometric error: $errString")
+                    promptActive = false
+                    when {
+                        cancelledByLock ->
+                            reportAuth(purpose, false, "locked", lockMessage(appLock.remainingMs()))
+
+                        errorCode == BiometricPrompt.ERROR_LOCKOUT ||
+                            errorCode == BiometricPrompt.ERROR_LOCKOUT_PERMANENT -> {
+                            // Android's own limit fired. If it came after wrong scans in THIS prompt,
+                            // count it as our 5th wrong try.
+                            if (failuresInPrompt > 0 && !appLock.isLocked()) appLock.registerFailure(force = true)
+                            if (appLock.isLocked()) {
+                                reportAuth(purpose, false, "locked", lockMessage(appLock.remainingMs()))
+                            } else if (errorCode == BiometricPrompt.ERROR_LOCKOUT_PERMANENT) {
+                                reportAuth(purpose, false, "system_locked",
+                                    "Android has locked the fingerprint sensor. Unlock the phone once with its screen lock, then try again.")
+                            } else {
+                                reportAuth(purpose, false, "system_locked",
+                                    "Android paused the fingerprint sensor for about 30 seconds. Use your PIN or wait.")
+                            }
+                        }
+
+                        errorCode == BiometricPrompt.ERROR_NEGATIVE_BUTTON ||
+                            errorCode == BiometricPrompt.ERROR_USER_CANCELED ||
+                            errorCode == BiometricPrompt.ERROR_CANCELED ->
+                            reportAuth(purpose, false, "cancelled", "")
+
+                        else -> reportAuth(purpose, false, "error", "Fingerprint error: $errString")
                     }
                 }
             }
         )
+
+        val (title, subtitle) = when (purpose) {
+            "login" -> "Unlock Hotspot Unlock" to "Scan your fingerprint to open the app"
+            "reset" -> "Reset App PIN" to "Scan your fingerprint to set a new PIN"
+            else -> "Unlock Windows Laptop" to "Authenticate using fingerprint to send HID sequence"
+        }
         val info = BiometricPrompt.PromptInfo.Builder()
-            .setTitle("Unlock Windows Laptop")
-            .setSubtitle("Authenticate using fingerprint to send HID sequence")
+            .setTitle(title)
+            .setSubtitle(subtitle)
+            .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_WEAK)
             .setNegativeButtonText("Cancel")
             .build()
         prompt.authenticate(info)
+    }
+
+    /** Sends the outcome of a fingerprint prompt to whoever asked for it. */
+    private fun reportAuth(purpose: String, ok: Boolean, code: String, message: String) {
+        when (purpose) {
+            "unlock" -> {
+                if (ok) {
+                    executeUnlockTransmission()
+                } else if (code != "cancelled") {
+                    toast(message)
+                    val js = "window.onUnlockResult && window.onUnlockResult(false, ${JSONObject.quote(message)})"
+                    webView.evaluateJavascript(js, null)
+                }
+            }
+            else -> {
+                if (purpose == "reset" && ok) {
+                    resetAuthorizedUntil = SystemClock.elapsedRealtime() + 120_000L // 2 minutes
+                }
+                val js = "window.onAuthResult && window.onAuthResult(" +
+                    "${JSONObject.quote(purpose)}, $ok, ${JSONObject.quote(code)}, ${JSONObject.quote(message)})"
+                webView.evaluateJavascript(js, null)
+            }
+        }
     }
 
     private fun executeUnlockTransmission() {
@@ -260,7 +362,45 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface fun getDiagnostics(): String = bluetoothManager.diagnostics()
 
         @JavascriptInterface fun triggerFingerprintUnlock() {
-            mainHandler.post { showBiometricPrompt() }
+            mainHandler.post { showFingerprintPrompt("unlock") }
+        }
+
+        // ---- app lock: fingerprint login, Forgot PIN, wrong-try lockout ----
+
+        @JavascriptInterface fun canUseFingerprint(): Boolean = isFingerprintAvailable()
+
+        @JavascriptInterface fun startAppFingerprint() {
+            mainHandler.post { showFingerprintPrompt("login") }
+        }
+
+        @JavascriptInterface fun startPinReset() {
+            mainHandler.post { showFingerprintPrompt("reset") }
+        }
+
+        /** Milliseconds left in the wrong-try lockout (0 = not locked). */
+        @JavascriptInterface fun getLockoutRemainingMs(): Long = appLock.remainingMs()
+
+        /** Returns "OK", "WRONG:<tries left>", "LOCKED", or "NOPIN" (no PIN stored natively). */
+        @JavascriptInterface fun verifyPin(pin: String): String {
+            if (appLock.isLocked()) return "LOCKED"
+            val saved = prefs.getString(KEY_PIN, "") ?: ""
+            if (saved.isEmpty()) return "NOPIN"
+            if (MessageDigest.isEqual(pin.toByteArray(), saved.toByteArray())) {
+                appLock.registerSuccess()
+                return "OK"
+            }
+            return if (appLock.registerFailure() > 0) "LOCKED" else "WRONG:" + appLock.triesLeft()
+        }
+
+        /** Sets a new PIN, but only within 2 minutes after a successful Forgot-PIN fingerprint scan. */
+        @JavascriptInterface fun resetPinAfterAuth(newPin: String): Boolean {
+            if (SystemClock.elapsedRealtime() > resetAuthorizedUntil) return false
+            if (!Regex("^[0-9]{4,6}$").matches(newPin)) return false
+            prefs.edit().putString(KEY_PIN, newPin).apply()
+            resetAuthorizedUntil = 0L
+            appLock.registerSuccess()
+            toast("App PIN reset")
+            return true
         }
 
         @JavascriptInterface fun makeDiscoverable() {
