@@ -10,12 +10,25 @@
 
   <!-- APP SECURITY PIN LOCK OVERLAY -->
   <div id="pin-overlay" class="overlay active">
-    <div class="card pin-card">
+    <div id="pin-card" class="card pin-card">
       <h2>App Security</h2>
       <p id="pin-instruction">Enter your App PIN to continue</p>
       <input type="password" id="pin-input" maxlength="6" pattern="[0-9]*" inputmode="numeric" placeholder="Enter PIN" />
       <button id="pin-btn" class="btn primary-btn">Unlock App</button>
+      <button id="pin-finger-btn" class="btn outline-btn hidden">Use fingerprint</button>
+      <button id="pin-forgot-btn" class="link-btn hidden">Forgot PIN?</button>
       <div id="pin-error" class="error-msg"></div>
+    </div>
+
+    <!-- Shown only after a successful fingerprint scan from "Forgot PIN?" -->
+    <div id="reset-card" class="card pin-card hidden">
+      <h2>Set a new PIN</h2>
+      <p class="subtext">Fingerprint verified. Choose a new 4-6 digit PIN.</p>
+      <input type="password" id="reset-pin-1" maxlength="6" pattern="[0-9]*" inputmode="numeric" placeholder="New PIN" />
+      <input type="password" id="reset-pin-2" maxlength="6" pattern="[0-9]*" inputmode="numeric" placeholder="Repeat new PIN" />
+      <button id="reset-save-btn" class="btn primary-btn">Save new PIN</button>
+      <button id="reset-cancel-btn" class="link-btn">Cancel</button>
+      <div id="reset-error" class="error-msg"></div>
     </div>
   </div>
 
