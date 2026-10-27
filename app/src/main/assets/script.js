@@ -7,6 +7,20 @@ document.addEventListener("DOMContentLoaded", () => {
   const pinInstruction = document.getElementById("pin-instruction");
   const mainApp = document.getElementById("main-app");
 
+  // App-lock extras (fingerprint login, Forgot PIN, lockout countdown)
+  const AUTO_PROMPT_FINGERPRINT = true; // set to false to open with the PIN pad only
+  const pinFingerBtn = document.getElementById("pin-finger-btn");
+  const pinForgotBtn = document.getElementById("pin-forgot-btn");
+  const pinCard = document.getElementById("pin-card");
+  const resetCard = document.getElementById("reset-card");
+  const resetPin1 = document.getElementById("reset-pin-1");
+  const resetPin2 = document.getElementById("reset-pin-2");
+  const resetSaveBtn = document.getElementById("reset-save-btn");
+  const resetCancelBtn = document.getElementById("reset-cancel-btn");
+  const resetError = document.getElementById("reset-error");
+  let lockPoll = null;
+  let appUnlocked = false;
+
   const tabBtns = document.querySelectorAll(".tab-btn");
   const tabContents = document.querySelectorAll(".tab-content");
 
@@ -29,6 +43,7 @@ document.addEventListener("DOMContentLoaded", () => {
       pinInstruction.textContent = "Create a 4-6 digit App PIN";
       pinBtn.textContent = "Set PIN & Unlock";
     }
+    setupLockScreen(!!savedPin);
 
     let savedPwd = getNativeData("getPassword");
     if (savedPwd) {
@@ -45,7 +60,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // APP PIN LOCK LOGIC
   pinBtn.addEventListener("click", () => {
     const inputPin = pinInput.value;
-    let savedPin = getNativeData("getAppPin");
+    const savedPin = getNativeData("getAppPin");
 
     if (!savedPin) {
       if (inputPin.length >= 4) {
@@ -54,16 +69,136 @@ document.addEventListener("DOMContentLoaded", () => {
       } else {
         pinError.textContent = "PIN must be 4 to 6 digits";
       }
+      return;
+    }
+
+    // New app: the phone checks the PIN and counts wrong tries (lockout).
+    let result = "NOPIN";
+    if (hasBridge("verifyPin")) result = String(window.AndroidInterface.verifyPin(inputPin));
+
+    if (result === "OK") {
+      unlockApp();
+    } else if (result === "LOCKED") {
+      pinInput.value = "";
+      updateLockState();
+    } else if (result.startsWith("WRONG")) {
+      const left = result.split(":")[1];
+      pinInput.value = "";
+      pinError.textContent = "Incorrect PIN" + (left ? " (" + left + " tries left)" : "");
+    } else if (inputPin === savedPin) {
+      unlockApp(); // old app version without lockout support
     } else {
-      if (inputPin === savedPin) {
-        unlockApp();
-      } else {
-        pinError.textContent = "Incorrect PIN";
-      }
+      pinError.textContent = "Incorrect PIN";
     }
   });
 
+  // FINGERPRINT LOGIN + FORGOT PIN
+  pinFingerBtn.addEventListener("click", () => {
+    pinError.textContent = "";
+    callNative("startAppFingerprint");
+  });
+
+  pinForgotBtn.addEventListener("click", () => {
+    if (!fingerprintAvailable()) {
+      pinError.textContent =
+        "Fingerprint isn't set up on this phone, so the PIN can't be reset here.";
+      return;
+    }
+    pinError.textContent = "";
+    callNative("startPinReset");
+  });
+
+  // The phone reports the result of every app-lock fingerprint scan here
+  window.onAuthResult = (purpose, ok, code, message) => {
+    if (purpose === "login") {
+      if (ok) { unlockApp(); return; }
+    } else if (purpose === "reset") {
+      if (ok) { showResetCard(); return; }
+    } else {
+      return;
+    }
+    if (code !== "cancelled" && message) pinError.textContent = message;
+    updateLockState();
+  };
+
+  function showResetCard() {
+    resetPin1.value = "";
+    resetPin2.value = "";
+    resetError.textContent = "";
+    pinCard.classList.add("hidden");
+    resetCard.classList.remove("hidden");
+  }
+
+  resetCancelBtn.addEventListener("click", () => {
+    resetCard.classList.add("hidden");
+    pinCard.classList.remove("hidden");
+  });
+
+  resetSaveBtn.addEventListener("click", () => {
+    const a = resetPin1.value;
+    const b = resetPin2.value;
+    if (!/^\d{4,6}$/.test(a)) { resetError.textContent = "PIN must be 4 to 6 digits"; return; }
+    if (a !== b) { resetError.textContent = "The two PINs don't match"; return; }
+
+    const saved = hasBridge("resetPinAfterAuth") &&
+      String(window.AndroidInterface.resetPinAfterAuth(a)) === "true";
+    if (!saved) {
+      resetError.textContent = "The fingerprint check expired. Tap Cancel, then Forgot PIN? and scan again.";
+      return;
+    }
+    localStorage.setItem("app_pin", a);
+    unlockApp();
+  });
+
+  // Lock screen setup, wrong-try countdown
+  function hasBridge(name) {
+    return !!(window.AndroidInterface && typeof window.AndroidInterface[name] === "function");
+  }
+
+  function fingerprintAvailable() {
+    return hasBridge("startAppFingerprint") && hasBridge("canUseFingerprint") &&
+      String(window.AndroidInterface.canUseFingerprint()) === "true";
+  }
+
+  function lockRemainingMs() {
+    if (!hasBridge("getLockoutRemainingMs")) return 0;
+    const n = Number(window.AndroidInterface.getLockoutRemainingMs());
+    return isNaN(n) ? 0 : n;
+  }
+
+  function setupLockScreen(hasPin) {
+    if (hasBridge("getLockoutRemainingMs")) {
+      lockPoll = setInterval(updateLockState, 500);
+      updateLockState();
+    }
+    if (!hasPin) return; // first run: there is no PIN to log in with yet
+    if (hasBridge("startAppFingerprint")) {
+      pinForgotBtn.classList.remove("hidden");
+      if (fingerprintAvailable()) {
+        pinFingerBtn.classList.remove("hidden");
+        if (AUTO_PROMPT_FINGERPRINT && lockRemainingMs() === 0) {
+          setTimeout(() => callNative("startAppFingerprint"), 500);
+        }
+      }
+    }
+  }
+
+  function updateLockState() {
+    if (appUnlocked) return;
+    const rem = lockRemainingMs();
+    const locked = rem > 0;
+    [pinInput, pinBtn, pinFingerBtn, pinForgotBtn].forEach((el) => { el.disabled = locked; });
+    if (locked) {
+      pinError.textContent = "Too many wrong tries. Try again in " + Math.ceil(rem / 1000) + " s";
+    } else if (pinError.dataset.lock === "1") {
+      pinError.textContent = ""; // the countdown just ended
+    }
+    pinError.dataset.lock = locked ? "1" : "0";
+  }
+
   function unlockApp() {
+    appUnlocked = true;
+    if (lockPoll) clearInterval(lockPoll);
     pinOverlay.classList.add("hidden");
     mainApp.classList.remove("hidden");
   }
