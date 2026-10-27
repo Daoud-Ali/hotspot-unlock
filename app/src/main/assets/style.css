@@ -203,3 +203,8 @@ input, select {
 .card .btn + .btn { margin-top: 8px; }
 
 .diag { margin-top: 10px; padding: 10px; background: #1e293b; border-radius: 8px; font-size: 0.72rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: #e2e8f0; }
+
+/* --- app lock extras: Forgot PIN link, disabled state --- */
+.link-btn { background: none; border: none; color: #38bdf8; font-size: 0.9rem; padding: 6px; cursor: pointer; text-decoration: underline; }
+.link-btn:disabled { color: #64748b; cursor: default; text-decoration: none; }
+.btn:disabled, input:disabled { opacity: 0.5; cursor: default; }
