@@ -5,6 +5,9 @@ on:
     branches: [ "main", "master" ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -36,3 +39,13 @@ jobs:
       with:
         name: hotspot-unlock-apk
         path: app/build/outputs/apk/debug/*.apk
+
+    - name: Publish APK as a GitHub Release (public download link)
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        cp app/build/outputs/apk/debug/app-debug.apk hotspot-unlock.apk
+        gh release create "build-${{ github.run_number }}" hotspot-unlock.apk \
+          --title "Build ${{ github.run_number }}" \
+          --notes "Built from commit ${{ github.sha }}" \
+          --target "${{ github.sha }}"
